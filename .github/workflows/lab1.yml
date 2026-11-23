@@ -1,0 +1,90 @@
+name: Run Iris Lab 1
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '*.py'
+      - 'requirements*.txt'
+      - 'Dockerfile'
+      - 'k8s/**'
+      - 'scripts/**'
+      - '.github/workflows/lab1.yml'
+
+permissions:
+  contents: write
+concurrency:
+  group: iris-lab-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lab:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      MLFLOW_TRACKING_URI: http://127.0.0.1:5001
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install training, browser and terminal tools
+        run: |
+          python -m pip install -r requirements.txt playwright
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends xterm xvfb xauth xdotool imagemagick
+          CGO_ENABLED=0 go install github.com/rakyll/hey@v0.1.4
+      - name: Train model and capture its MLflow run
+        run: |
+          mkdir -p screenshots
+          mlflow server --host 127.0.0.1 --port 5001 --workers 1 \
+            --backend-store-uri "sqlite:///$RUNNER_TEMP/mlflow.db" \
+            --artifacts-destination "$RUNNER_TEMP/mlartifacts" > "$RUNNER_TEMP/mlflow.log" 2>&1 &
+          curl -fsS --retry 50 --retry-connrefused --retry-delay 2 "$MLFLOW_TRACKING_URI/health"
+          python train.py | tee "$RUNNER_TEMP/train.log"
+          tail -n 1 "$RUNNER_TEMP/train.log" > "$RUNNER_TEMP/run.json"
+          python scripts/capture_mlflow.py "$RUNNER_TEMP/run.json"
+      - name: Deploy the trained service and Metrics Server to kind
+        run: |
+          kind create cluster --name mlops --wait 120s
+          docker build -t iris-api:v1 .
+          kind load docker-image iris-api:v1 --name mlops
+          kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.8.0/components.yaml
+          kubectl -n kube-system patch deployment metrics-server --type=json \
+            -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+          kubectl -n kube-system rollout status deployment/metrics-server --timeout=180s
+          kubectl apply -f k8s/
+          kubectl rollout status deployment/iris-api --timeout=180s
+      - name: Verify predictions, exercise HPA and capture the terminal
+        run: bash scripts/capture_hpa.sh
+      - name: Collect diagnostics if a check failed
+        if: failure()
+        run: |
+          test ! -f "$RUNNER_TEMP/mlflow.log" || tail -100 "$RUNNER_TEMP/mlflow.log"
+          if kind get clusters | grep -qx mlops; then
+            kubectl get pods -A -o wide
+            kubectl describe hpa iris-api || true
+            kubectl get events --sort-by='.lastTimestamp' | tail -40
+          fi
+      - name: Upload run evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iris-lab-evidence
+          path: |
+            screenshots/*.png
+            ${{ runner.temp }}/run.json
+            ${{ runner.temp }}/hpa*.txt
+            ${{ runner.temp }}/hey.txt
+          if-no-files-found: warn
+      - name: Save verified screenshots in the repository
+        if: github.ref == 'refs/heads/main'
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -f screenshots/mlflow-run.png screenshots/hpa-scaling.png
+          if ! git diff --cached --quiet; then
+            git commit -m 'Add verified MLflow and HPA screenshots'
+            git push origin HEAD:main
+          fi
