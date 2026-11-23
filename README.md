@@ -4,12 +4,25 @@
 
 ## 執行結果
 
-| 實驗 | 截圖 |
-| --- | --- |
-| MLflow · Iris 分類模型的訓練參數與準確率 | [MLflow Run](screenshots/mlflow-run.png) |
-| HPA · 壓測前、壓測中及停止後的 CPU 和副本數 | [HPA Scaling](screenshots/hpa-scaling.png) |
+2026-11-23 以 GitHub Actions 在臨時 kind 叢集完成端到端實驗。[查看本次成功執行與完整紀錄](https://github.com/charlie-lo/mlops-lab1-iris/actions/runs/45120673558)。
 
-[GitHub Actions 執行紀錄](https://github.com/charlie-lo/mlops-lab1-iris/actions/workflows/lab1.yml)
+### MLflow Run
+
+Random Forest 使用 100 棵樹，測試集預測正確 27/30 筆（accuracy 0.90）。Run ID 為 `b05aabdb2e3b41a4b309101b44ab4c3e`。
+
+![MLflow Run：accuracy 0.9、n_estimators 100 與已儲存的模型](screenshots/mlflow-run.png)
+
+### HPA Scaling
+
+`/predict` 對講義範例回傳 `{"predictions":[0]}`。下表取自同一次壓測的三個觀測時間點。
+
+| 觀測時間（UTC） | 階段 | CPU 使用率 / 目標 | 副本數 |
+| --- | --- | --- | --- |
+| 05:58:11 | 壓測前 | 2% / 50% | 1 |
+| 05:58:57 | 壓測中，觀察到擴容 | 500% / 50% | 4 |
+| 06:05:40 | 壓測停止後，縮容完成 | 2% / 50% | 1 |
+
+![HPA Scaling：kubectl 顯示壓測前、擴容及縮容後的實際副本數](screenshots/hpa-scaling.png)
 
 ## 訓練與實驗追蹤
 
